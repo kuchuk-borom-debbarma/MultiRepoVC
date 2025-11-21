@@ -4,7 +4,6 @@ import (
 	"MultiRepoVC/src/internal/core/version_control/v1/model"
 	"MultiRepoVC/src/internal/utils/fs"
 	"MultiRepoVC/src/internal/utils/time"
-	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -20,37 +19,34 @@ func New() *VersionControlV1 {
 	return &VersionControlV1{}
 }
 
+// ======================================================================
+// INIT
+// ======================================================================
+
 func (v *VersionControlV1) Init(repoName string, author string) error {
-	currentDir := fs.GetCurrentDir()
-	repoDir := filepath.Join(currentDir, ".mrvc")
+	root := fs.GetCurrentDir()
+	mrvc := filepath.Join(root, ".mrvc")
 
-	log.Printf("Initializing MultiRepoVC %s, author %s on path %s",
-		repoName, author, currentDir)
-
-	// 1. Check if repo exists
-	if fs.IsDirPresent(repoDir) {
+	if fs.IsDirPresent(mrvc) {
 		return errors.New("repository already initialized")
 	}
 
-	// 2. Create .mrvc
-	if err := fs.CreateDir(repoDir); err != nil {
+	if err := fs.CreateDir(mrvc); err != nil {
 		return err
 	}
 
-	// 3. Create metadata
-	metadata := model.Metadata{
+	meta := model.Metadata{
 		Name:      repoName,
 		Author:    author,
 		CreatedAt: strconv.FormatInt(time.GetCurrentTimestamp(), 10),
 	}
 
-	// 4. Write metadata JSON
-	if err := fs.WriteJSON(filepath.Join(repoDir, "metadata.json"), metadata); err != nil {
-		return err
-	}
-
-	return nil
+	return fs.WriteJSON(filepath.Join(mrvc, "metadata.json"), meta)
 }
+
+// ======================================================================
+// COMMIT
+// ======================================================================
 
 func (v *VersionControlV1) Commit(message string, author string, files []string) error {
 	if len(files) == 0 {
@@ -59,82 +55,78 @@ func (v *VersionControlV1) Commit(message string, author string, files []string)
 
 	repoRoot := fs.GetCurrentDir()
 
-	// ------------------------------
-	// WILDCARD HANDLING
-	// ------------------------------
+	// -----------------------------
+	// Wildcard "*" → commit all files
+	// -----------------------------
 	if len(files) == 1 && files[0] == "*" {
-		log.Println("Wildcard commit: all non-ignored files")
-
-		allFiles, err := fs.ListFilesExcludingIgnore(repoRoot)
+		all, err := fs.ListFilesExcludingIgnore(repoRoot)
 		if err != nil {
 			return err
 		}
 
-		normalized := make([]string, 0, len(allFiles))
-		for _, f := range allFiles {
-			normalized = append(normalized, fs.NormalizePath(f))
+		files = make([]string, 0, len(all))
+		for _, f := range all {
+			files = append(files, fs.NormalizePath(f))
 		}
-		files = normalized
 	} else {
-		// Validate user-specified files
 		for i, f := range files {
-			files[i] = fs.NormalizePath(f)
-			if !fs.FileExists(files[i]) {
-				return errors.New("file does not exist: " + f)
+			normalized := fs.NormalizePath(f)
+			files[i] = normalized
+			if !fs.FileExists(normalized) {
+				return errors.New("file does not exist: " + normalized)
 			}
 		}
 	}
 
-	log.Println("Committing files:", files)
-
-	// --------------------------------------------------------------------
-	// DIRECTORY TREE MAP
-	// Key: absolute normalized directory path
-	// Value: TreeObject of that directory
-	// --------------------------------------------------------------------
+	// -----------------------------
+	// Build directory → TreeObject
+	// -----------------------------
 	directoryTrees := make(map[string]model.TreeObject)
 
-	// --------------------------------------------------------------------
-	// PROCESS EACH FILE → CREATE BLOBS AND TREE ENTRIES
-	// --------------------------------------------------------------------
+	// Parent → children mapping (optimization)
+	children := make(map[string][]string)
+
 	for _, filePath := range files {
 
-		// 1. Calculate hash
-		hash, err := fs.CalculateFileHash(filePath)
-		if err != nil {
-			return err
-		}
-
-		// 2. Save blob object
+		// --------------------------------------
+		// 1. Blob
+		// --------------------------------------
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			return err
 		}
-		if err := SaveObject(hash, content); err != nil {
+
+		blobHash := HashContent(content)
+
+		if err := SaveObject(blobHash, content); err != nil {
 			return err
 		}
 
-		// 3. Resolve directory path
+		// --------------------------------------
+		// 2. Determine directory of file
+		// --------------------------------------
 		fileDir := filepath.Dir(filePath)
 		if fileDir == "." {
 			fileDir = repoRoot
 		}
-		fileDir = fs.NormalizePath(fileDir)
 
-		// 4. Ensure directoryTrees entry
+		fileDir = fs.NormalizePath(fileDir)
+		if _, exists := directoryTrees[fileDir]; !exists {
+			directoryTrees[fileDir] = model.TreeObject{Entries: []model.TreeEntry{}}
+		}
+
+		// Add file entry into this directory tree
 		tree := directoryTrees[fileDir]
 		tree = addOrReplaceTreeEntry(tree, model.TreeEntry{
 			Name:      filepath.Base(filePath),
 			EntryType: "blob",
-			Hash:      hash,
+			Hash:      blobHash,
 		})
 		directoryTrees[fileDir] = tree
 
-		// ----------------------------------------------------------------
-		// 5. Recursively walk up to the repo root, building empty trees
-		//    So if file is at: /root/a/b/c.txt
-		//    we ensure directories: /root/a/b, /root/a, /root
-		// ----------------------------------------------------------------
+		// --------------------------------------
+		// 3. Ensure all parent directories exist
+		// --------------------------------------
 		current := fileDir
 		for current != repoRoot {
 			parent := filepath.Dir(current)
@@ -143,81 +135,95 @@ func (v *VersionControlV1) Commit(message string, author string, files []string)
 			}
 			parent = fs.NormalizePath(parent)
 
-			// ensure parent exists
 			if _, ok := directoryTrees[parent]; !ok {
 				directoryTrees[parent] = model.TreeObject{Entries: []model.TreeEntry{}}
 			}
+
+			children[parent] = append(children[parent], current)
 
 			current = parent
 		}
 	}
 
-	// ------------------------------------------------------------
-	// BUILD TREE HIERARCHY — bottom up
-	// ------------------------------------------------------------
-
-	// Sorting keys ensures deterministic tree builds
+	// ==================================================================
+	// DIRECTORY SORTING (deepest → shallowest)
+	// ==================================================================
 	var dirs []string
 	for d := range directoryTrees {
 		dirs = append(dirs, d)
 	}
-	sort.Strings(dirs)
 
-	treeHashes := make(map[string]string)
-
-	// Process directories deepest-first
 	sort.Slice(dirs, func(i, j int) bool {
 		return strings.Count(dirs[i], "/") > strings.Count(dirs[j], "/")
 	})
 
+	// ==================================================================
+	// BUILD TREES BOTTOM-UP (single pass)  O(N)
+	// ==================================================================
+
+	treeHashes := make(map[string]string)
+
 	for _, dir := range dirs {
 		tree := directoryTrees[dir]
 
-		// Add child directory entries
-		for _, childDir := range dirs {
-			if filepath.Dir(childDir) == dir {
-				// add child tree entry
-				hash := treeHashes[childDir]
-				tree = addOrReplaceTreeEntry(tree, model.TreeEntry{
-					Name:      filepath.Base(childDir),
-					EntryType: "tree",
-					Hash:      hash,
-				})
-			}
+		// Add subtree entries
+		for _, child := range children[dir] {
+			tree = addOrReplaceTreeEntry(tree, model.TreeEntry{
+				Name:      filepath.Base(child),
+				EntryType: "tree",
+				Hash:      treeHashes[child],
+			})
 		}
 
-		// Hash final directory tree
-		jsonBytes, _ := json.Marshal(tree)
-		treeHash := sha256Hex(jsonBytes)
-		SaveObject(treeHash, jsonBytes)
+		// Deterministic ordering
+		sort.Slice(tree.Entries, func(i, j int) bool {
+			return tree.Entries[i].Name < tree.Entries[j].Name
+		})
 
-		treeHashes[dir] = treeHash
+		hash, jsonBytes, err := HashTree(tree)
+		if err != nil {
+			return err
+		}
+
+		if err := SaveObject(hash, jsonBytes); err != nil {
+			return err
+		}
+
+		treeHashes[dir] = hash
 	}
 
-	// root tree is the repo root
 	rootTreeHash := treeHashes[repoRoot]
 
-	// ------------------------------------------------------------
-	// CREATE COMMIT
-	// ------------------------------------------------------------
+	// ==================================================================
+	// CREATE COMMIT OBJECT
+	// ==================================================================
+
 	commit := model.CommitObject{
 		Tree:      rootTreeHash,
-		Parent:    strings.TrimSpace(readHEAD()),
+		Parent:    readHEAD(),
 		Message:   message,
 		Author:    author,
 		Timestamp: strconv.FormatInt(time.GetCurrentTimestamp(), 10),
 	}
 
-	data, _ := json.Marshal(commit)
-	commitHash := sha256Hex(data)
-	SaveObject(commitHash, data)
+	commitHash, commitBytes, err := HashCommit(commit)
+	if err != nil {
+		return err
+	}
 
-	// Update HEAD
+	if err := SaveObject(commitHash, commitBytes); err != nil {
+		return err
+	}
+
 	updateHEAD(commitHash)
 
 	log.Println("Commit created:", commitHash)
 	return nil
 }
+
+// ======================================================================
+// STATUS (placeholder)
+// ======================================================================
 
 func (v *VersionControlV1) Status() (string, error) {
 	return "clean", nil
