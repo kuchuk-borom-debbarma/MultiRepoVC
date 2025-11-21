@@ -2,18 +2,18 @@ package commands
 
 import (
 	v1 "MultiRepoVC/src/internal/core/version_control/v1"
-	"MultiRepoVC/src/internal/utils/arg"
-	"errors"
 )
 
-type InitCommand struct{}
+type InitCommand struct {
+	BaseCommand
+}
 
 func (c *InitCommand) Name() string {
 	return "init"
 }
 
 func (c *InitCommand) Description() string {
-	return "Initializes a new MRVC repository in the current directory."
+	return "Initializes a new MRVC repository."
 }
 
 func (c *InitCommand) RequiredArgs() []string {
@@ -24,18 +24,9 @@ func (c *InitCommand) OptionalArgs() []string {
 	return []string{}
 }
 
-func (c *InitCommand) Execute(args []string) error {
-	parsed := arg.ParseArgs(args)
-
-	name := parsed["name"]
-	author := parsed["author"]
-
-	if name == "" {
-		return errors.New("missing required argument: --name")
-	}
-	if author == "" {
-		return errors.New("missing required argument: --author")
-	}
+func (c *InitCommand) ExecuteCommand(p map[string]string) error {
+	name := p["name"]
+	author := p["author"]
 
 	vc := v1.New()
 	return vc.Init(name, author)

@@ -29,25 +29,14 @@ func (r *Registry) Get(name string) (Command, error) {
 	return cmd, nil
 }
 
-// List all commands
 func (r *Registry) List() {
-	fmt.Println("\nAvailable commands:\n")
-
+	fmt.Println("\nAvailable commands:")
 	for name, cmd := range r.commands {
 		fmt.Printf("  %s  -  %s\n", name, cmd.Description())
-
-		// Required args
-		req := cmd.RequiredArgs()
-		if len(req) > 0 {
-			fmt.Printf("      Required: --%s\n", strings.Join(req, " --"))
+		fmt.Printf("      Required: --%s\n", strings.Join(cmd.RequiredArgs(), " --"))
+		if len(cmd.OptionalArgs()) > 0 {
+			fmt.Printf("      Optional: --%s\n", strings.Join(cmd.OptionalArgs(), " --"))
 		}
-
-		// Optional args
-		opt := cmd.OptionalArgs()
-		if len(opt) > 0 {
-			fmt.Printf("      Optional: --%s\n", strings.Join(opt, " --"))
-		}
-
 		fmt.Println()
 	}
 }

@@ -2,12 +2,13 @@ package commands
 
 import (
 	v1 "MultiRepoVC/src/internal/core/version_control/v1"
-	"MultiRepoVC/src/internal/utils/arg"
 	"errors"
 	"fmt"
 )
 
-type CommitCommand struct{}
+type CommitCommand struct {
+	BaseCommand
+}
 
 func (c *CommitCommand) Name() string {
 	return "commit"
@@ -25,26 +26,15 @@ func (c *CommitCommand) OptionalArgs() []string {
 	return []string{"author"}
 }
 
-// -------------------------------------------------------
-// 🎯 Execution
-// -------------------------------------------------------
-
-func (c *CommitCommand) Execute(args []string) error {
-	p := arg.ParseArgs(args)
-
-	// Required: --message
+func (c *CommitCommand) ExecuteCommand(p map[string]string) error {
 	message := p["message"]
-	if message == "" {
-		return errors.New("missing required argument: --message")
-	}
 
-	// Optional: --author
 	author := p["author"]
 	if author == "" {
 		author = "unknown"
 	}
 
-	// Positional files (0, 1, 2…)
+	// Extract positional file args (0,1,2,...)
 	var files []string
 	for i := 0; ; i++ {
 		key := fmt.Sprintf("%d", i)
@@ -63,9 +53,6 @@ func (c *CommitCommand) Execute(args []string) error {
 	return vc.Commit(message, author, files)
 }
 
-// -------------------------------------------------------
-// 🎯 Register this command
-// -------------------------------------------------------
 func init() {
 	Global.Register(&CommitCommand{})
 }

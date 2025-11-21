@@ -15,7 +15,6 @@ func main() {
 
 	cmdName := os.Args[1]
 
-	// Special-case built-in "help"
 	if cmdName == "help" {
 		commands.Global.List()
 		return
@@ -29,7 +28,8 @@ func main() {
 		return
 	}
 
-	if err := cmd.Execute(os.Args[2:]); err != nil {
+	base := commands.BaseCommand{}
+	if err := base.Run(cmd, os.Args[2:]); err != nil {
 		fmt.Println("Error:", err)
 	}
 }
