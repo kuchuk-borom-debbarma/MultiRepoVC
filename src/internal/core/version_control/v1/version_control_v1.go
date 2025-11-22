@@ -4,6 +4,7 @@ import (
 	"MultiRepoVC/src/internal/core/version_control/v1/model"
 	"MultiRepoVC/src/internal/utils/fs"
 	"MultiRepoVC/src/internal/utils/time"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -235,16 +236,149 @@ func (v *VersionControlV1) Commit(message string, author string, files []string)
 		return err
 	}
 
-	updateHEAD(commitHash)
+	err = updateHEAD(commitHash)
+	if err != nil {
+		return err
+	}
 
 	log.Println("Commit created:", commitHash)
 	return nil
 }
 
 // ======================================================================
-// STATUS (placeholder)
+// STATUS
 // ======================================================================
 
 func (v *VersionControlV1) Status() (string, error) {
-	return "clean", nil
+	repoRoot := fs.GetCurrentDir()
+
+	head := readHEAD()
+	if head == "" {
+		return "No commits yet.", nil
+	}
+
+	// ------------------------------------------------------
+	// Load HEAD commit
+	// ------------------------------------------------------
+	commitPath := filepath.Join(".mrvc", "objects", head[:2], head[2:])
+	commitBytes, err := os.ReadFile(commitPath)
+	if err != nil {
+		return "", err
+	}
+
+	var commit model.CommitObject
+	if err := json.Unmarshal(commitBytes, &commit); err != nil {
+		return "", err
+	}
+
+	// ------------------------------------------------------
+	// Load HEAD tree
+	// ------------------------------------------------------
+	treeHash := commit.Tree
+	treePath := filepath.Join(".mrvc", "objects", treeHash[:2], treeHash[2:])
+	treeBytes, err := os.ReadFile(treePath)
+	if err != nil {
+		return "", err
+	}
+
+	var headTree model.TreeObject
+	if err := json.Unmarshal(treeBytes, &headTree); err != nil {
+		return "", err
+	}
+
+	// Convert HEAD tree to map path → hash
+	headFiles := make(map[string]string)
+	err = flattenTree(repoRoot, "", headTree, headFiles)
+	if err != nil {
+		return "", err
+	}
+
+	// ------------------------------------------------------
+	// Scan working directory
+	// ------------------------------------------------------
+	workingFiles, err := fs.ListFilesExcludingIgnore(repoRoot)
+	if err != nil {
+		return "", err
+	}
+
+	// Normalize paths to match headFiles keys
+	normalized := make([]string, 0, len(workingFiles))
+	for _, f := range workingFiles {
+		normalized = append(normalized, fs.NormalizePath(f))
+	}
+
+	// ------------------------------------------------------
+	// Compare
+	// ------------------------------------------------------
+	var modified []string
+	var deleted []string
+	var untracked []string
+
+	seen := make(map[string]bool)
+
+	for _, w := range normalized {
+		rel, _ := filepath.Rel(repoRoot, w)
+		rel = filepath.ToSlash(rel)
+
+		seen[rel] = true
+
+		// In HEAD?
+		headHash, exists := headFiles[rel]
+		if !exists {
+			untracked = append(untracked, rel)
+			continue
+		}
+
+		// Compare content hash
+		currentHash, err := fs.CalculateFileHash(w)
+		if err != nil {
+			return "", err
+		}
+
+		if currentHash != headHash {
+			modified = append(modified, rel)
+		}
+	}
+
+	// Deleted files: in HEAD but not in working dir
+	for rel := range headFiles {
+		if !seen[rel] {
+			deleted = append(deleted, rel)
+		}
+	}
+
+	// ------------------------------------------------------
+	// Build output
+	// ------------------------------------------------------
+	var sb strings.Builder
+
+	if len(modified) == 0 && len(deleted) == 0 && len(untracked) == 0 {
+		return "clean", nil
+	}
+
+	if len(modified) > 0 {
+		sb.WriteString("Modified:\n")
+		for _, m := range modified {
+			sb.WriteString("  " + m + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(deleted) > 0 {
+		sb.WriteString("Deleted:\n")
+		for _, d := range deleted {
+			sb.WriteString("  " + d + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(untracked) > 0 {
+		sb.WriteString("Untracked:\n")
+		for _, u := range untracked {
+			sb.WriteString("  " + u + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String(), nil
 }
