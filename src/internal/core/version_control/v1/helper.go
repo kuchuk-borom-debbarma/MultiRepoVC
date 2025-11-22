@@ -91,3 +91,36 @@ func readHEAD() string {
 func updateHEAD(hash string) error {
 	return os.WriteFile(".mrvc/HEAD", []byte(strings.TrimSpace(hash)), 0644)
 }
+
+// Recursively flattens a TreeObject into path → blobHash mapping
+func flattenTree(repoRoot, prefix string, tree model.TreeObject, out map[string]string) error {
+	for _, entry := range tree.Entries {
+		full := entry.Name
+		if prefix != "" {
+			full = prefix + "/" + entry.Name
+		}
+
+		if entry.EntryType == "blob" {
+			out[full] = entry.Hash
+			continue
+		}
+
+		if entry.EntryType == "tree" {
+			path := filepath.Join(".mrvc", "objects", entry.Hash[:2], entry.Hash[2:])
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+
+			var subtree model.TreeObject
+			if err := json.Unmarshal(data, &subtree); err != nil {
+				return err
+			}
+
+			if err := flattenTree(repoRoot, full, subtree, out); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
