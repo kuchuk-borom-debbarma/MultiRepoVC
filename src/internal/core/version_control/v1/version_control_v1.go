@@ -91,6 +91,7 @@ func (v *VersionControlV1) Commit(message string, author string, files []string)
 		// --------------------------------------
 		// 1. Blob
 		// --------------------------------------
+		//TODO stream large files instead of reading all at once
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			return err
@@ -106,7 +107,7 @@ func (v *VersionControlV1) Commit(message string, author string, files []string)
 		// 2. Determine directory of file
 		// --------------------------------------
 		fileDir := filepath.Dir(filePath)
-		if fileDir == "." {
+		if fileDir == "." { //if file is in repo root directory, set to repo root
 			fileDir = repoRoot
 		}
 
@@ -146,8 +147,19 @@ func (v *VersionControlV1) Commit(message string, author string, files []string)
 	}
 
 	// ==================================================================
-	// DIRECTORY SORTING (deepest → shallowest)
+	// We must sort directories from deepest → shallowest because tree
+	// hashes must be built bottom-up.
+	//
+	// A tree object contains the hashes of its children (files or
+	// subtrees). Therefore, a parent directory cannot be hashed until
+	// all of its subdirectories have already been hashed.
+	//
+	// By processing deeper directories first, we guarantee that when we
+	// build a parent tree, all child tree hashes are already available.
+	// This ensures deterministic, correct tree construction—just like
+	// Git’s own object model.
 	// ==================================================================
+
 	var dirs []string
 	for d := range directoryTrees {
 		dirs = append(dirs, d)
@@ -156,11 +168,19 @@ func (v *VersionControlV1) Commit(message string, author string, files []string)
 	sort.Slice(dirs, func(i, j int) bool {
 		return strings.Count(dirs[i], "/") > strings.Count(dirs[j], "/")
 	})
-
 	// ==================================================================
 	// BUILD TREES BOTTOM-UP (single pass)  O(N)
+	//
+	// After sorting folders deepest → shallowest, this loop constructs
+	// the tree objects for every directory. For each folder:
+	//   • Insert subtree entries using child directory hashes
+	//   • Sort entries for deterministic hashing
+	//   • Compute the tree hash
+	//   • Save the tree object
+	//
+	// Processing bottom-up ensures that when we hash a directory, all
+	// its children (files and subtrees) already have hashes available.
 	// ==================================================================
-
 	treeHashes := make(map[string]string)
 
 	for _, dir := range dirs {
